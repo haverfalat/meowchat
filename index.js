@@ -215,49 +215,76 @@ const app = new Elysia()
     }
     return { ok: true, username }
   })
-  .post(
-    '/api/upload',
-    async ({ body, cookie, set }) => {
-      const username = getUserFromToken(cookie[COOKIE]?.value)
-      if (!username) {
-        set.status = 401
-        return { ok: false, error: 'Unauthorized' }
+  .post('/api/upload', async ({ request, cookie, set }) => {
+    const username = getUserFromToken(cookie[COOKIE]?.value)
+    if (!username) {
+      set.status = 401
+      return { ok: false, error: 'Unauthorized' }
+    }
+
+    const form = await request.formData()
+    const rawFiles = [...form.getAll('files'), ...form.getAll('file')].filter(
+      (f) => f && typeof f === 'object' && 'size' in f && f.size >= 0,
+    )
+    if (rawFiles.length === 0) {
+      set.status = 400
+      return { ok: false, error: 'No files provided.' }
+    }
+    if (rawFiles.length > 10) {
+      set.status = 400
+      return { ok: false, error: 'Max 10 files per message.' }
+    }
+
+    const files = []
+    for (const file of rawFiles) {
+      if (file.size > 100 * 1024 * 1024) {
+        set.status = 400
+        return { ok: false, error: `File ${file.name} exceeds 100 MB limit.` }
       }
-      const file = body.file
       const id = crypto.randomUUID().slice(0, 12)
       const safeName = basename(file.name || 'file').replace(/[^\w.\-() ]+/g, '_') || 'file'
       const dir = join(UPLOADS_DIR, id)
       mkdirSync(dir, { recursive: true })
       await Bun.write(join(dir, safeName), file)
+      files.push({
+        id,
+        name: safeName,
+        size: file.size,
+        url: `/uploads/${id}/${encodeURIComponent(safeName)}`,
+      })
+    }
 
-      const msg = {
-        id: crypto.randomUUID(),
-        username,
-        text: typeof body.caption === 'string' ? body.caption.trim().slice(0, 500) : '',
-        file: {
-          id,
-          name: safeName,
-          size: file.size,
-          url: `/uploads/${id}/${encodeURIComponent(safeName)}`,
-        },
-        createdAt: Date.now(),
-        seenBy: [username],
-      }
-      db.messages.push(msg)
-      if (db.messages.length > 500) db.messages = db.messages.slice(-500)
-      saveDb()
+    const caption = form.get('caption')
+    const replyToId = form.get('replyToId')
+    const replyTarget =
+      typeof replyToId === 'string' ? db.messages.find((m) => m.id === replyToId) : null
+    const replyTo = replyTarget
+      ? {
+          id: replyTarget.id,
+          username: replyTarget.username,
+          text:
+            replyTarget.text ||
+            (replyTarget.files?.map((f) => f.name).join(', ') || replyTarget.file?.name || 'file'),
+        }
+      : undefined
 
-      clearTyping(app.server, username)
-      broadcast(app.server, { type: 'message', message: msg })
-      return { ok: true, message: msg }
-    },
-    {
-      body: t.Object({
-        file: t.File({ maxSize: 100 * 1024 * 1024 }),
-        caption: t.Optional(t.String()),
-      }),
-    },
-  )
+    const msg = {
+      id: crypto.randomUUID(),
+      username,
+      text: typeof caption === 'string' ? caption.trim().slice(0, 2000) : '',
+      files,
+      ...(replyTo ? { replyTo } : {}),
+      createdAt: Date.now(),
+      seenBy: [username],
+    }
+    db.messages.push(msg)
+    if (db.messages.length > 500) db.messages = db.messages.slice(-500)
+    saveDb()
+
+    clearTyping(app.server, username)
+    broadcast(app.server, { type: 'message', message: msg })
+    return { ok: true, message: msg }
+  })
   .get('/uploads/:id/:name', ({ params, set }) => {
     const id = basename(params.id)
     const name = basename(decodeURIComponent(params.name))
@@ -327,10 +354,25 @@ const app = new Elysia()
         const text = data.text.trim().slice(0, 2000)
         if (!text) return
 
+        const replyTarget =
+          typeof data.replyToId === 'string'
+            ? db.messages.find((m) => m.id === data.replyToId)
+            : null
+        const replyTo = replyTarget
+          ? {
+              id: replyTarget.id,
+              username: replyTarget.username,
+              text:
+                replyTarget.text ||
+                (replyTarget.files?.map((f) => f.name).join(', ') || replyTarget.file?.name || 'file'),
+            }
+          : undefined
+
         const msg = {
           id: crypto.randomUUID(),
           username,
           text,
+          ...(replyTo ? { replyTo } : {}),
           createdAt: Date.now(),
           seenBy: [username],
         }
@@ -371,8 +413,9 @@ const app = new Elysia()
         const target = db.messages.find((m) => m.id === data.id)
         if (target) {
           db.messages = db.messages.filter((m) => m.id !== data.id)
-          if (target.file?.id) {
-            rmSync(join(UPLOADS_DIR, basename(target.file.id)), { recursive: true, force: true })
+          const toDelete = [...(target.files || []), ...(target.file ? [target.file] : [])]
+          for (const f of toDelete) {
+            if (f?.id) rmSync(join(UPLOADS_DIR, basename(f.id)), { recursive: true, force: true })
           }
           saveDb()
           broadcast(app.server, { type: 'delete', id: data.id })

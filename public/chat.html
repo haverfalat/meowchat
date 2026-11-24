@@ -74,12 +74,31 @@
     }
     .msg {
       display: flex;
+      flex-direction: column;
+      margin-bottom: 2px;
+    }
+    .msg-row {
+      display: flex;
       justify-content: space-between;
       gap: 8px;
-      margin-bottom: 2px;
+    }
+    .msg-reply {
+      font-size: 11px;
+      color: #666;
+      padding-left: 10px;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .msg-reply:hover {
+      text-decoration: underline;
     }
     .msg.ping {
       background: #fff3cd;
+    }
+    .msg.flash {
+      background: #e2e8f0;
     }
     .msg-line {
       white-space: pre-wrap;
@@ -163,11 +182,13 @@
           <div id="messages"></div>
           <div id="jump-latest"><a href="#" id="jump-link">[new messages ↓]</a></div>
           <pre id="upload-progress" style="display: none; margin: 4px 0 0 0;"></pre>
+          <div id="reply-bar" style="display: none; font-size: 11px; color: #555; margin-top: 4px;"></div>
+          <div id="pending-files" style="display: none; font-size: 11px; margin-top: 4px;"></div>
           <pre id="typing">&nbsp;</pre>
           <form id="chat-form">
             <div id="mention-menu"></div>
-            <input id="file-input" type="file" hidden>
-            <input id="msg-input" type="text" placeholder="say something... (@ to mention, drop file)" autocomplete="off" maxlength="2000">
+            <input id="file-input" type="file" multiple hidden>
+            <input id="msg-input" type="text" placeholder="say something... (@ to mention, drop/paste files)" autocomplete="off" maxlength="2000">
             <button type="button" id="file-btn">file</button>
             <button type="submit">send</button>
           </form>
@@ -192,10 +213,14 @@
     const fileInput = document.getElementById('file-input');
     const fileBtn = document.getElementById('file-btn');
     const uploadProgressEl = document.getElementById('upload-progress');
+    const replyBarEl = document.getElementById('reply-bar');
+    const pendingFilesEl = document.getElementById('pending-files');
     const clearLink = document.getElementById('clear-link');
     const logoutLink = document.getElementById('logout-link');
 
     let isAdmin = false;
+    let replyTo = null;
+    let pendingFiles = [];
 
     let soundOn = localStorage.getItem('meow_sound') !== '0';
     function updateSoundLabel() {
@@ -329,10 +354,96 @@
       return seenOthers.length > 0 ? `seen: ${seenOthers.join(', ')}` : 'sent';
     }
 
+    function setReply(msg) {
+      replyTo = {
+        id: msg.id,
+        username: msg.username,
+        text: msg.text || (msg.files?.map((f) => f.name).join(', ') || msg.file?.name || 'file'),
+      };
+      renderReplyBar();
+      msgInput.focus();
+    }
+
+    function clearReply() {
+      replyTo = null;
+      renderReplyBar();
+    }
+
+    function renderReplyBar() {
+      if (!replyTo) {
+        replyBarEl.style.display = 'none';
+        replyBarEl.textContent = '';
+        return;
+      }
+      replyBarEl.style.display = 'block';
+      replyBarEl.textContent = '';
+      const snippet = replyTo.text.length > 50 ? `${replyTo.text.slice(0, 50)}...` : replyTo.text;
+      replyBarEl.appendChild(document.createTextNode(`replying to @${replyTo.username}: "${snippet}" `));
+      const cancel = document.createElement('a');
+      cancel.href = '#';
+      cancel.textContent = '[x]';
+      cancel.onclick = (e) => {
+        e.preventDefault();
+        clearReply();
+      };
+      replyBarEl.appendChild(cancel);
+    }
+
+    function renderPendingFiles() {
+      if (pendingFiles.length === 0) {
+        pendingFilesEl.style.display = 'none';
+        pendingFilesEl.textContent = '';
+        return;
+      }
+      pendingFilesEl.style.display = 'block';
+      pendingFilesEl.textContent = 'attached: ';
+      pendingFiles.forEach((f, idx) => {
+        if (idx > 0) pendingFilesEl.appendChild(document.createTextNode(', '));
+        pendingFilesEl.appendChild(document.createTextNode(`${f.name} (${formatBytes(f.size)}) `));
+        const rm = document.createElement('a');
+        rm.href = '#';
+        rm.textContent = '[x]';
+        rm.onclick = (e) => {
+          e.preventDefault();
+          pendingFiles.splice(idx, 1);
+          renderPendingFiles();
+        };
+        pendingFilesEl.appendChild(rm);
+      });
+    }
+
+    function addPendingFiles(fileList) {
+      for (const f of fileList || []) {
+        if (pendingFiles.length >= 10) break;
+        pendingFiles.push(f);
+      }
+      renderPendingFiles();
+      msgInput.focus();
+    }
+
     function createMessageEl(msg) {
       const wrap = document.createElement('div');
-      wrap.className = isPingForMe(msg) ? 'msg ping' : 'msg';
+      wrap.className = isPingForMe(msg) || msg.replyTo?.username === currentUser ? 'msg ping' : 'msg';
       wrap.dataset.id = msg.id;
+
+      if (msg.replyTo) {
+        const rep = document.createElement('div');
+        rep.className = 'msg-reply';
+        const snippet = msg.replyTo.text.length > 60 ? `${msg.replyTo.text.slice(0, 60)}...` : msg.replyTo.text;
+        rep.textContent = `↳ @${msg.replyTo.username}: ${snippet}`;
+        rep.onclick = () => {
+          const target = messagesEl.querySelector(`[data-id="${msg.replyTo.id}"]`);
+          if (target) {
+            target.scrollIntoView({ block: 'center' });
+            target.classList.add('flash');
+            setTimeout(() => target.classList.remove('flash'), 900);
+          }
+        };
+        wrap.appendChild(rep);
+      }
+
+      const row = document.createElement('div');
+      row.className = 'msg-row';
 
       const line = document.createElement('span');
       line.className = 'msg-line';
@@ -347,27 +458,30 @@
       line.appendChild(sender);
 
       line.appendChild(document.createTextNode(': '));
-      if (msg.file) {
-        const fileLink = document.createElement('a');
-        fileLink.href = msg.file.url;
-        fileLink.target = '_blank';
-        fileLink.rel = 'noopener noreferrer';
-        fileLink.textContent = msg.file.name;
-        line.appendChild(fileLink);
 
-        const sizeSpan = document.createElement('span');
-        sizeSpan.className = 'seen';
-        sizeSpan.textContent = ` (${formatBytes(msg.file.size)})`;
-        line.appendChild(sizeSpan);
-
-        if (msg.text) {
-          line.appendChild(document.createTextNode(' '));
-          appendTextWithMentions(line, msg.text);
-        }
-      } else {
+      if (msg.text) {
         appendTextWithMentions(line, msg.text);
       }
-      wrap.appendChild(line);
+
+      const msgFiles = msg.files || (msg.file ? [msg.file] : []);
+      if (msgFiles.length > 0) {
+        if (msg.text) line.appendChild(document.createTextNode(' '));
+        msgFiles.forEach((f, idx) => {
+          if (idx > 0) line.appendChild(document.createTextNode(', '));
+          const fileLink = document.createElement('a');
+          fileLink.href = f.url;
+          fileLink.target = '_blank';
+          fileLink.rel = 'noopener noreferrer';
+          fileLink.textContent = f.name;
+          line.appendChild(fileLink);
+
+          const sizeSpan = document.createElement('span');
+          sizeSpan.className = 'seen';
+          sizeSpan.textContent = ` (${formatBytes(f.size)})`;
+          line.appendChild(sizeSpan);
+        });
+      }
+      row.appendChild(line);
 
       const meta = document.createElement('span');
       meta.className = 'msg-meta';
@@ -376,6 +490,17 @@
       seenEl.className = 'seen';
       seenEl.textContent = formatSeen(msg);
       meta.appendChild(seenEl);
+
+      const replyBtn = document.createElement('a');
+      replyBtn.href = '#';
+      replyBtn.className = 'seen';
+      replyBtn.textContent = '[reply]';
+      replyBtn.title = 'reply to message';
+      replyBtn.onclick = (e) => {
+        e.preventDefault();
+        setReply(msg);
+      };
+      meta.appendChild(replyBtn);
 
       if (isAdmin) {
         const del = document.createElement('a');
@@ -392,7 +517,8 @@
         meta.appendChild(del);
       }
 
-      wrap.appendChild(meta);
+      row.appendChild(meta);
+      wrap.appendChild(row);
 
       return wrap;
     }
@@ -746,10 +872,24 @@
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
       const text = msgInput.value.trim();
+      if (pendingFiles.length > 0) {
+        const filesToSend = [...pendingFiles];
+        pendingFiles = [];
+        renderPendingFiles();
+        msgInput.value = '';
+        const replyId = replyTo?.id;
+        clearReply();
+        clearTimeout(typingStopTimer);
+        lastTypingSent = 0;
+        uploadFiles(filesToSend, text, replyId);
+        return;
+      }
+
       if (!text) return;
 
-      ws.send(JSON.stringify({ type: 'chat', text }));
+      ws.send(JSON.stringify({ type: 'chat', text, ...(replyTo ? { replyToId: replyTo.id } : {}) }));
       msgInput.value = '';
+      clearReply();
       clearTimeout(typingStopTimer);
       lastTypingSent = 0;
     });
@@ -762,23 +902,21 @@
     document.addEventListener('visibilitychange', onReturnToTab);
     window.addEventListener('focus', onReturnToTab);
 
-    function uploadFile(file) {
-      if (!file) return;
+    function uploadFiles(files, caption, replyToId) {
+      if (!files || files.length === 0) return;
       const formData = new FormData();
-      formData.append('file', file);
-      const caption = msgInput.value.trim();
-      if (caption) {
-        formData.append('caption', caption);
-        msgInput.value = '';
-      }
+      for (const f of files) formData.append('files', f);
+      if (caption) formData.append('caption', caption);
+      if (replyToId) formData.append('replyToId', replyToId);
 
+      const label = files.length === 1 ? files[0].name : `${files.length} files`;
       const xhr = new XMLHttpRequest();
       const startTime = Date.now();
       let lastTime = startTime;
       let lastLoaded = 0;
 
       uploadProgressEl.style.display = 'block';
-      uploadProgressEl.textContent = `uploading ${file.name} [..........] 0%`;
+      uploadProgressEl.textContent = `uploading ${label} [..........] 0%`;
 
       xhr.upload.onprogress = (e) => {
         if (!e.lengthComputable) return;
@@ -797,7 +935,7 @@
         }
 
         uploadProgressEl.textContent =
-          `uploading ${file.name} [${bar}] ${pct}% (${formatBytes(Math.max(0, speed))}/s) ${formatBytes(e.loaded)}/${formatBytes(e.total)}`;
+          `uploading ${label} [${bar}] ${pct}% (${formatBytes(Math.max(0, speed))}/s) ${formatBytes(e.loaded)}/${formatBytes(e.total)}`;
       };
 
       xhr.onload = () => {
@@ -820,8 +958,8 @@
 
     fileBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => {
-      if (fileInput.files[0]) {
-        uploadFile(fileInput.files[0]);
+      if (fileInput.files.length > 0) {
+        addPendingFiles(fileInput.files);
         fileInput.value = '';
       }
     });
@@ -831,8 +969,15 @@
     });
     messagesEl.addEventListener('drop', (e) => {
       e.preventDefault();
-      const file = e.dataTransfer?.files?.[0];
-      if (file) uploadFile(file);
+      if (e.dataTransfer?.files?.length > 0) {
+        addPendingFiles(e.dataTransfer.files);
+      }
+    });
+    msgInput.addEventListener('paste', (e) => {
+      if (e.clipboardData?.files?.length > 0) {
+        e.preventDefault();
+        addPendingFiles(e.clipboardData.files);
+      }
     });
 
     clearLink.addEventListener('click', (e) => {
