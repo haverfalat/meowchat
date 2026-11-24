@@ -91,11 +91,14 @@
 <body>
   <div class="container">
     <div class="box">
-      <div style="display: flex; justify-content: center; align-items: center; gap: 16px;">
+      <div style="display: flex; justify-content: center; align-items: center; gap: 16px; flex-wrap: wrap;">
         <div style="font-size: 44px; line-height: 44px;">:3</div>
         <pre>meowchat
 <span id="whoami">...</span>
 <a href="#" id="logout-link">[logout]</a></pre>
+        <div style="border-left: 1px solid #000; padding-left: 16px;">
+          <pre id="addresses" style="margin: 0;">...</pre>
+        </div>
       </div>
       <hr>
       <div class="layout">
@@ -118,6 +121,7 @@
 
   <script>
     const whoamiEl = document.getElementById('whoami');
+    const addressesEl = document.getElementById('addresses');
     const onlineEl = document.getElementById('online');
     const messagesEl = document.getElementById('messages');
     const typingEl = document.getElementById('typing');
@@ -256,6 +260,11 @@
       }, 700);
     }
 
+    function renderAddresses(urls) {
+      const list = urls || [];
+      addressesEl.textContent = list.length > 0 ? list.join('\n') : window.location.origin;
+    }
+
     function renderTyping(typingUsers) {
       const others = (typingUsers || []).filter((u) => u !== currentUser);
       if (others.length === 0) {
@@ -289,11 +298,14 @@
           whoamiEl.textContent = `user: ${currentUser}`;
           messages = data.messages || [];
           onlineEl.textContent = (data.online || []).map((u) => `* ${u}`).join('\n') || 'none';
+          renderAddresses(data.addresses);
           renderTyping(data.typing || []);
           renderMessages(true);
           markVisibleAsSeen();
         } else if (data.type === 'presence') {
           onlineEl.textContent = (data.online || []).map((u) => `* ${u}`).join('\n') || 'none';
+        } else if (data.type === 'addresses') {
+          renderAddresses(data.urls);
         } else if (data.type === 'typing') {
           renderTyping(data.typing || []);
         } else if (data.type === 'message') {

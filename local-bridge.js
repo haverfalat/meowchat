@@ -1,34 +1,76 @@
-import { networkInterfaces } from 'node:os'
+import { hostname, networkInterfaces } from 'node:os'
 
 const TARGET = (process.env.TARGET || 'http://localhost:3000').replace(/\/+$/, '')
 const PORT = Number(process.env.PORT) || 80
 const HOSTNAME = process.env.MDNS_HOST || 'meowchat.local'
 const NO_MDNS = process.env.NO_MDNS === '1'
 
-const getLanIp = () => {
-  if (process.env.LAN_IP) return process.env.LAN_IP
+const bridgeId = `${hostname()}-${PORT}-${crypto.randomUUID().slice(0, 8)}`
+const wsTargetBase = TARGET.replace(/^http/, 'ws')
+const portSuffix = PORT === 80 ? '' : `:${PORT}`
+
+const getLanIps = () => {
+  if (process.env.LAN_IP) return [process.env.LAN_IP]
+  const ips = []
   for (const addrs of Object.values(networkInterfaces())) {
     for (const addr of addrs || []) {
-      if (addr.family === 'IPv4' && !addr.internal) return addr.address
+      if (addr.family === 'IPv4' && !addr.internal) ips.push(addr.address)
     }
   }
-  return '127.0.0.1'
+  return ips.length > 0 ? ips : ['127.0.0.1']
 }
 
-const lanIp = getLanIp()
-const wsTargetBase = TARGET.replace(/^http/, 'ws')
+let mdns = null
+let currentPrimaryIp = ''
 
-// Advertise meowchat.local on the Mac's LAN via Bonjour/mDNS
-const mdns =
-  !NO_MDNS && process.platform === 'darwin'
-    ? Bun.spawn(['dns-sd', '-P', 'meowchat', '_http._tcp', 'local', String(PORT), HOSTNAME, lanIp], {
-        stdout: 'ignore',
-        stderr: 'ignore',
-      })
-    : null
+const syncMdns = () => {
+  const ips = getLanIps()
+  const primary = ips[0]
+  if (primary === currentPrimaryIp) return ips
 
-const cleanup = () => {
+  currentPrimaryIp = primary
   mdns?.kill()
+  mdns =
+    !NO_MDNS && process.platform === 'darwin'
+      ? Bun.spawn(['dns-sd', '-P', 'meowchat', '_http._tcp', 'local', String(PORT), HOSTNAME, primary], {
+          stdout: 'ignore',
+          stderr: 'ignore',
+        })
+      : null
+  console.log(`bridging http://${HOSTNAME}${portSuffix} (${ips.join(', ')}) -> ${TARGET}`)
+  return ips
+}
+
+const reportToServer = async () => {
+  const ips = syncMdns()
+  const urls = [
+    ...(!NO_MDNS ? [`http://${HOSTNAME}${portSuffix}`] : []),
+    ...ips.map((ip) => `http://${ip}${portSuffix}`),
+  ]
+  try {
+    await fetch(`${TARGET}/api/bridges`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: bridgeId, urls }),
+    })
+  } catch {
+    // Server temporarily unreachable; next heartbeat will retry
+  }
+}
+
+syncMdns()
+reportToServer()
+const heartbeat = setInterval(reportToServer, 5000)
+
+const cleanup = async () => {
+  clearInterval(heartbeat)
+  mdns?.kill()
+  try {
+    await fetch(`${TARGET}/api/bridges/${bridgeId}`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(500),
+    })
+  } catch {}
   process.exit(0)
 }
 process.on('SIGINT', cleanup)
@@ -95,5 +137,3 @@ Bun.serve({
     },
   },
 })
-
-console.log(`bridging http://${HOSTNAME}:${PORT} (${lanIp}) -> ${TARGET}`)

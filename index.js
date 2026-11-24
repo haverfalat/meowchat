@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { networkInterfaces } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Elysia, t } from 'elysia'
 
@@ -46,9 +47,45 @@ const parseCookie = (header, name) => {
 
 const sockets = new Map() // ws.id -> username
 const typing = new Map()  // username -> timeout
+const bridges = new Map() // bridgeId -> { urls, lastSeen }
 
 const onlineList = () => [...new Set(sockets.values())].sort()
 const typingList = () => [...typing.keys()].sort()
+
+const getLocalUrls = () => {
+  const portSuffix = PORT === 80 ? '' : `:${PORT}`
+  const urls = []
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const addr of addrs || []) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        urls.push(`http://${addr.address}${portSuffix}`)
+      }
+    }
+  }
+  return urls
+}
+
+const getAccessibleUrls = () => {
+  const now = Date.now()
+  for (const [id, b] of bridges) {
+    if (now - b.lastSeen > 20000) bridges.delete(id)
+  }
+  const all = new Set(getLocalUrls())
+  for (const b of bridges.values()) {
+    for (const u of b.urls) all.add(u)
+  }
+  return [...all]
+}
+
+let lastUrlsKey = ''
+const syncAddresses = (server) => {
+  const urls = getAccessibleUrls()
+  const key = urls.join('|')
+  if (key !== lastUrlsKey) {
+    lastUrlsKey = key
+    broadcast(server, { type: 'addresses', urls })
+  }
+}
 
 const broadcast = (server, payload) =>
   server?.publish('chat', JSON.stringify(payload))
@@ -161,6 +198,21 @@ const app = new Elysia()
     }
     return { ok: true, username }
   })
+  .post(
+    '/api/bridges',
+    ({ body }) => {
+      bridges.set(body.id, { urls: body.urls.slice(0, 16), lastSeen: Date.now() })
+      syncAddresses(app.server)
+      return { ok: true }
+    },
+    { body: t.Object({ id: t.String(), urls: t.Array(t.String()) }) },
+  )
+  .delete('/api/bridges/:id', ({ params }) => {
+    if (bridges.delete(params.id)) {
+      syncAddresses(app.server)
+    }
+    return { ok: true }
+  })
   .ws('/ws', {
     open(ws) {
       const token =
@@ -183,6 +235,7 @@ const app = new Elysia()
           messages: db.messages.slice(-100),
           online: onlineList(),
           typing: typingList(),
+          addresses: getAccessibleUrls(),
         }),
       )
       broadcast(app.server, { type: 'presence', online: onlineList() })
@@ -254,5 +307,7 @@ const app = new Elysia()
     },
   })
   .listen(PORT)
+
+setInterval(() => syncAddresses(app.server), 5000)
 
 console.log(`meowchat running at http://localhost:${app.server?.port}`)
