@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>meowchat</title>
+  <link id="favicon" rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23fff'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='18' text-anchor='middle' fill='%23000'%3E:3%3C/text%3E%3C/svg%3E">
+  <style>
+    * {
+      line-height: 14px;
+    }
+    body {
+      font-family: monospace;
+      margin-top: 24px;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .box {
+      width: 100%;
+      max-width: 720px;
+    }
+    .layout {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    #online-box {
+      width: 150px;
+      flex-shrink: 0;
+      border: 1px solid #000;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+    #online-box pre {
+      margin: 0;
+    }
+    .chat-col {
+      flex: 1;
+      min-width: 0;
+    }
+    @media (max-width: 640px) {
+      .layout {
+        flex-direction: column;
+      }
+      #online-box {
+        width: 100%;
+      }
+    }
+    hr {
+      width: 100%;
+    }
+    #messages {
+      height: 360px;
+      overflow-y: auto;
+      border: 1px solid #000;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+    .msg {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 2px;
+    }
+    .msg.ping {
+      background: #fff3cd;
+    }
+    .msg-line {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .seen {
+      color: #666;
+      font-size: 11px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    #chat-form {
+      display: flex;
+      gap: 6px;
+      width: 100%;
+    }
+    #msg-input {
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="box">
+      <div style="display: flex; justify-content: center; align-items: center; gap: 16px;">
+        <div style="font-size: 44px; line-height: 44px;">:3</div>
+        <pre>meowchat
+<span id="whoami">...</span>
+<a href="#" id="logout-link">[logout]</a></pre>
+      </div>
+      <hr>
+      <div class="layout">
+        <div id="online-box">
+          <pre>online</pre>
+          <hr>
+          <pre id="online">...</pre>
+        </div>
+        <div class="chat-col">
+          <div id="messages"></div>
+          <pre id="typing">&nbsp;</pre>
+          <form id="chat-form">
+            <input id="msg-input" type="text" placeholder="say something..." autocomplete="off" maxlength="2000">
+            <button type="submit">send</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const whoamiEl = document.getElementById('whoami');
+    const onlineEl = document.getElementById('online');
+    const messagesEl = document.getElementById('messages');
+    const typingEl = document.getElementById('typing');
+    const chatForm = document.getElementById('chat-form');
+    const msgInput = document.getElementById('msg-input');
+    const logoutLink = document.getElementById('logout-link');
+
+    let currentUser = '';
+    let ws = null;
+    let messages = [];
+    let typingStopTimer = null;
+    let lastTypingSent = 0;
+
+    function formatTime(ts) {
+      const d = new Date(ts);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
+
+    function renderMessages(scrollToBottom = false) {
+      const wasAtBottom =
+        messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 30;
+
+      messagesEl.textContent = '';
+      if (messages.length === 0) {
+        const empty = document.createElement('pre');
+        empty.textContent = 'no messages yet. say hi!';
+        messagesEl.appendChild(empty);
+        return;
+      }
+
+      function formatSeen(msg) {
+        const seenOthers = (msg.seenBy || []).filter((u) => u !== msg.username);
+        return seenOthers.length > 0 ? `seen: ${seenOthers.join(', ')}` : 'sent';
+      }
+
+      for (const msg of messages) {
+        const wrap = document.createElement('div');
+        wrap.className = isPingForMe(msg) ? 'msg ping' : 'msg';
+        wrap.dataset.id = msg.id;
+
+        const line = document.createElement('span');
+        line.className = 'msg-line';
+        line.textContent = `[${formatTime(msg.createdAt)}] ${msg.username}: ${msg.text}`;
+        wrap.appendChild(line);
+
+        const seenEl = document.createElement('span');
+        seenEl.className = 'seen';
+        seenEl.textContent = formatSeen(msg);
+        wrap.appendChild(seenEl);
+
+        messagesEl.appendChild(wrap);
+      }
+
+      if (scrollToBottom || wasAtBottom) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    }
+
+    function updateSeenInDom(updates) {
+      const map = new Map(updates.map((u) => [u.id, u.seenBy]));
+      for (const msg of messages) {
+        if (map.has(msg.id)) {
+          msg.seenBy = map.get(msg.id);
+          const el = messagesEl.querySelector(`[data-id="${msg.id}"] .seen`);
+          if (el) {
+            const seenOthers = msg.seenBy.filter((u) => u !== msg.username);
+            el.textContent = seenOthers.length > 0
+              ? `seen: ${seenOthers.join(', ')}`
+              : 'sent';
+          }
+        }
+      }
+    }
+
+    function markVisibleAsSeen() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (document.visibilityState !== 'visible') return;
+      if (!currentUser) return;
+
+      const unseenIds = messages
+        .filter((m) => !(m.seenBy || []).includes(currentUser))
+        .map((m) => m.id);
+
+      if (unseenIds.length > 0) {
+        ws.send(JSON.stringify({ type: 'seen', messageIds: unseenIds }));
+      }
+    }
+
+    const faviconEl = document.getElementById('favicon');
+    const ICON_NORMAL = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23fff'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='18' text-anchor='middle' fill='%23000'%3E:3%3C/text%3E%3C/svg%3E";
+    const ICON_MSG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='18' text-anchor='middle' fill='%23fff'%3E:3%3C/text%3E%3C/svg%3E";
+    const ICON_PING = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23d93025'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='20' font-weight='bold' text-anchor='middle' fill='%23fff'%3E!%3C/text%3E%3C/svg%3E";
+
+    let flashTimer = null;
+    let flashIsPing = false;
+
+    function isPingForMe(msg) {
+      if (!currentUser || !msg?.text) return false;
+      const escaped = currentUser.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`@${escaped}(?![a-zA-Z0-9_-])`, 'i').test(msg.text);
+    }
+
+    function stopFlash() {
+      if (flashTimer) {
+        clearInterval(flashTimer);
+        flashTimer = null;
+      }
+      flashIsPing = false;
+      document.title = 'meowchat';
+      faviconEl.href = ICON_NORMAL;
+    }
+
+    function notifyNewMessage(msg) {
+      if (!msg || msg.username === currentUser) return;
+      if (!document.hidden && document.hasFocus()) return;
+
+      const ping = isPingForMe(msg);
+      if (flashTimer && flashIsPing && !ping) return;
+
+      stopFlash();
+      flashIsPing = ping;
+      const alertTitle = ping
+        ? `(!) @${msg.username} pinged you!`
+        : `(*) ${msg.username}: ${msg.text.slice(0, 24)}`;
+      const alertIcon = ping ? ICON_PING : ICON_MSG;
+
+      let on = true;
+      document.title = alertTitle;
+      faviconEl.href = alertIcon;
+      flashTimer = setInterval(() => {
+        on = !on;
+        document.title = on ? alertTitle : 'meowchat';
+        faviconEl.href = on ? alertIcon : ICON_NORMAL;
+      }, 700);
+    }
+
+    function renderTyping(typingUsers) {
+      const others = (typingUsers || []).filter((u) => u !== currentUser);
+      if (others.length === 0) {
+        typingEl.innerHTML = '&nbsp;';
+      } else if (others.length === 1) {
+        typingEl.textContent = `${others[0]} is typing...`;
+      } else {
+        typingEl.textContent = `${others.join(', ')} are typing...`;
+      }
+    }
+
+    function connect() {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+
+      ws.onmessage = (event) => {
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (data.type === 'error') {
+          window.location.href = '/login';
+          return;
+        }
+
+        if (data.type === 'init') {
+          currentUser = data.username;
+          whoamiEl.textContent = `user: ${currentUser}`;
+          messages = data.messages || [];
+          onlineEl.textContent = (data.online || []).map((u) => `* ${u}`).join('\n') || 'none';
+          renderTyping(data.typing || []);
+          renderMessages(true);
+          markVisibleAsSeen();
+        } else if (data.type === 'presence') {
+          onlineEl.textContent = (data.online || []).map((u) => `* ${u}`).join('\n') || 'none';
+        } else if (data.type === 'typing') {
+          renderTyping(data.typing || []);
+        } else if (data.type === 'message') {
+          messages.push(data.message);
+          renderMessages(true);
+          markVisibleAsSeen();
+          notifyNewMessage(data.message);
+        } else if (data.type === 'seen') {
+          updateSeenInDom(data.updates || []);
+        }
+      };
+
+      ws.onclose = () => {
+        setTimeout(connect, 1500);
+      };
+    }
+
+    msgInput.addEventListener('input', () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const hasText = msgInput.value.trim().length > 0;
+      const now = Date.now();
+
+      if (hasText && now - lastTypingSent > 1500) {
+        ws.send(JSON.stringify({ type: 'typing', isTyping: true }));
+        lastTypingSent = now;
+      }
+
+      clearTimeout(typingStopTimer);
+      if (hasText) {
+        typingStopTimer = setTimeout(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'typing', isTyping: false }));
+          }
+          lastTypingSent = 0;
+        }, 2000);
+      } else {
+        ws.send(JSON.stringify({ type: 'typing', isTyping: false }));
+        lastTypingSent = 0;
+      }
+    });
+
+    chatForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const text = msgInput.value.trim();
+      if (!text) return;
+
+      ws.send(JSON.stringify({ type: 'chat', text }));
+      msgInput.value = '';
+      clearTimeout(typingStopTimer);
+      lastTypingSent = 0;
+    });
+
+    function onReturnToTab() {
+      if (!document.hidden) stopFlash();
+      markVisibleAsSeen();
+    }
+
+    document.addEventListener('visibilitychange', onReturnToTab);
+    window.addEventListener('focus', onReturnToTab);
+
+    logoutLink.addEventListener('click', async (e) => {
+      e.preventDefault();
+      await fetch('/api/logout', { method: 'POST' });
+      window.location.href = '/login';
+    });
+
+    connect();
+  </script>
+</body>
+</html>
