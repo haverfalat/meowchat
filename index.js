@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { Elysia, t } from 'elysia'
 
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), 'data', 'db.json')
+const ADMINS_PATH = process.env.ADMINS_PATH || join(process.cwd(), 'admins.json')
 const PORT = Number(process.env.PORT) || 3000
 const INVITE_CODE = process.env.INVITE_CODE || 'fieldg'
 const COOKIE = 'meow_session'
@@ -37,6 +38,20 @@ const saveDb = () => {
 
 const getUserFromToken = (token) =>
   db.sessions.find((s) => s.token === token)?.username ?? null
+
+const isAdmin = (username) => {
+  if (!username) return false
+  try {
+    if (!existsSync(ADMINS_PATH)) {
+      writeFileSync(ADMINS_PATH, '[]\n')
+      return false
+    }
+    const list = JSON.parse(readFileSync(ADMINS_PATH, 'utf-8'))
+    return Array.isArray(list) && list.some((u) => String(u).toLowerCase() === username.toLowerCase())
+  } catch {
+    return false
+  }
+}
 
 const parseCookie = (header, name) => {
   if (!header) return undefined
@@ -234,6 +249,7 @@ const app = new Elysia()
           type: 'init',
           version: BUILD_ID,
           username,
+          isAdmin: isAdmin(username),
           messages: db.messages.slice(-100),
           online: onlineList(),
           typing: typingList(),
@@ -296,6 +312,19 @@ const app = new Elysia()
           saveDb()
           broadcast(app.server, { type: 'seen', updates })
         }
+      } else if (data.type === 'delete' && typeof data.id === 'string') {
+        if (!isAdmin(username)) return
+        const before = db.messages.length
+        db.messages = db.messages.filter((m) => m.id !== data.id)
+        if (db.messages.length !== before) {
+          saveDb()
+          broadcast(app.server, { type: 'delete', id: data.id })
+        }
+      } else if (data.type === 'clear') {
+        if (!isAdmin(username)) return
+        db.messages = []
+        saveDb()
+        broadcast(app.server, { type: 'clear' })
       }
     },
     close(ws) {

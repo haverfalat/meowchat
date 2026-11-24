@@ -140,7 +140,7 @@
         <div style="font-size: 44px; line-height: 44px;">:3</div>
         <pre>meowchat <span id="conn-status">[connecting...]</span>
 <span id="whoami">...</span>
-<a href="#" id="sound-toggle">[sound: on]</a> <a href="#" id="logout-link">[logout]</a></pre>
+<a href="#" id="sound-toggle">[sound: on]</a> <a href="#" id="clear-link" style="display:none">[clear]</a> <a href="#" id="logout-link">[logout]</a></pre>
         <div style="border-left: 1px solid #000; padding-left: 16px;">
           <pre id="addresses" style="margin: 0;">...</pre>
         </div>
@@ -179,7 +179,10 @@
     const typingEl = document.getElementById('typing');
     const chatForm = document.getElementById('chat-form');
     const msgInput = document.getElementById('msg-input');
+    const clearLink = document.getElementById('clear-link');
     const logoutLink = document.getElementById('logout-link');
+
+    let isAdmin = false;
 
     let soundOn = localStorage.getItem('meow_sound') !== '0';
     function updateSoundLabel() {
@@ -331,6 +334,21 @@
       seenEl.className = 'seen';
       seenEl.textContent = formatSeen(msg);
       wrap.appendChild(seenEl);
+
+      if (isAdmin) {
+        const del = document.createElement('a');
+        del.href = '#';
+        del.className = 'seen';
+        del.textContent = '[x]';
+        del.title = 'delete message';
+        del.onclick = (e) => {
+          e.preventDefault();
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'delete', id: msg.id }));
+          }
+        };
+        wrap.appendChild(del);
+      }
 
       return wrap;
     }
@@ -526,7 +544,9 @@
           serverVersion = data.version || '';
           connStatusEl.textContent = '[connected]';
           currentUser = data.username;
-          whoamiEl.textContent = `user: ${currentUser}`;
+          isAdmin = Boolean(data.isAdmin);
+          clearLink.style.display = isAdmin ? 'inline' : 'none';
+          whoamiEl.textContent = isAdmin ? `user: ${currentUser} (admin)` : `user: ${currentUser}`;
           whoamiEl.style.color = userColor(currentUser);
           const prevLastId = messages[messages.length - 1]?.id;
           const nextLastId = data.messages?.[data.messages.length - 1]?.id;
@@ -554,6 +574,14 @@
           notifyNewMessage(data.message);
         } else if (data.type === 'seen') {
           updateSeenInDom(data.updates || []);
+        } else if (data.type === 'delete') {
+          messages = messages.filter((m) => m.id !== data.id);
+          const el = messagesEl.querySelector(`[data-id="${data.id}"]`);
+          if (el) el.remove();
+          if (messages.length === 0) renderMessages(true);
+        } else if (data.type === 'clear') {
+          messages = [];
+          renderMessages(true);
         }
       };
 
@@ -681,6 +709,14 @@
 
     document.addEventListener('visibilitychange', onReturnToTab);
     window.addEventListener('focus', onReturnToTab);
+
+    clearLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      if (!isAdmin || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (confirm('clear all messages?')) {
+        ws.send(JSON.stringify({ type: 'clear' }));
+      }
+    });
 
     logoutLink.addEventListener('click', async (e) => {
       e.preventDefault();
