@@ -7,6 +7,7 @@ const DB_PATH = process.env.DB_PATH || join(process.cwd(), 'data', 'db.json')
 const PORT = Number(process.env.PORT) || 3000
 const INVITE_CODE = process.env.INVITE_CODE || 'fieldg'
 const COOKIE = 'meow_session'
+const BUILD_ID = crypto.randomUUID()
 
 const db = (() => {
   try {
@@ -231,6 +232,7 @@ const app = new Elysia()
       ws.send(
         JSON.stringify({
           type: 'init',
+          version: BUILD_ID,
           username,
           messages: db.messages.slice(-100),
           online: onlineList(),

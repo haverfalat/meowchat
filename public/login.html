@@ -40,7 +40,7 @@ glhf!</pre>
     <hr>
     <pre>login or create an account</pre>
     <form id="auth-form">
-      <input id="username" type="text" placeholder="username" autocomplete="username" maxlength="24" required>
+      <input id="username" type="text" placeholder="username" autocomplete="username" maxlength="24" autofocus required>
       <input id="password" type="password" placeholder="password" autocomplete="current-password" required>
       <input id="invite" type="text" placeholder="invite code (to register)" autocomplete="off">
       <div class="row">
@@ -95,6 +95,13 @@ glhf!</pre>
 
     registerBtn.addEventListener('click', () => {
       submitAuth('/api/register');
+    });
+
+    document.getElementById('invite').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitAuth('/api/register');
+      }
     });
   </script>
 </body>

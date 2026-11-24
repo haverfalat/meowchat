@@ -11,7 +11,7 @@
     }
     body {
       font-family: monospace;
-      margin-top: 24px;
+      margin: 16px 8px;
     }
     .container {
       display: flex;
@@ -20,7 +20,7 @@
     }
     .box {
       width: 100%;
-      max-width: 720px;
+      max-width: 760px;
     }
     .layout {
       display: flex;
@@ -53,11 +53,24 @@
       width: 100%;
     }
     #messages {
-      height: 360px;
+      height: calc(100vh - 210px);
+      min-height: 260px;
+      max-height: 680px;
       overflow-y: auto;
       border: 1px solid #000;
       padding: 8px;
       box-sizing: border-box;
+    }
+    #jump-latest {
+      display: none;
+      margin-top: 4px;
+      font-size: 11px;
+    }
+    .addr-link {
+      cursor: pointer;
+    }
+    .addr-link:hover {
+      text-decoration: underline;
     }
     .msg {
       display: flex;
@@ -79,12 +92,44 @@
       flex-shrink: 0;
     }
     #chat-form {
+      position: relative;
       display: flex;
       gap: 6px;
       width: 100%;
     }
     #msg-input {
       flex: 1;
+    }
+    .user-link {
+      cursor: pointer;
+      font-weight: bold;
+    }
+    .user-link:hover {
+      text-decoration: underline;
+    }
+    .mention {
+      font-weight: bold;
+    }
+    #mention-menu {
+      display: none;
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      margin-bottom: 4px;
+      background: #fff;
+      border: 1px solid #000;
+      min-width: 160px;
+      max-height: 140px;
+      overflow-y: auto;
+      z-index: 10;
+    }
+    .mention-item {
+      padding: 3px 8px;
+      cursor: pointer;
+    }
+    .mention-item.active,
+    .mention-item:hover {
+      background: #eee;
     }
   </style>
 </head>
@@ -93,9 +138,9 @@
     <div class="box">
       <div style="display: flex; justify-content: center; align-items: center; gap: 16px; flex-wrap: wrap;">
         <div style="font-size: 44px; line-height: 44px;">:3</div>
-        <pre>meowchat
+        <pre>meowchat <span id="conn-status">[connecting...]</span>
 <span id="whoami">...</span>
-<a href="#" id="logout-link">[logout]</a></pre>
+<a href="#" id="sound-toggle">[sound: on]</a> <a href="#" id="logout-link">[logout]</a></pre>
         <div style="border-left: 1px solid #000; padding-left: 16px;">
           <pre id="addresses" style="margin: 0;">...</pre>
         </div>
@@ -103,15 +148,17 @@
       <hr>
       <div class="layout">
         <div id="online-box">
-          <pre>online</pre>
+          <pre>online (<span id="online-count">0</span>)</pre>
           <hr>
           <pre id="online">...</pre>
         </div>
         <div class="chat-col">
           <div id="messages"></div>
+          <div id="jump-latest"><a href="#" id="jump-link">[new messages ↓]</a></div>
           <pre id="typing">&nbsp;</pre>
           <form id="chat-form">
-            <input id="msg-input" type="text" placeholder="say something..." autocomplete="off" maxlength="2000">
+            <div id="mention-menu"></div>
+            <input id="msg-input" type="text" placeholder="say something... (@ to mention)" autocomplete="off" maxlength="2000">
             <button type="submit">send</button>
           </form>
         </div>
@@ -121,25 +168,171 @@
 
   <script>
     const whoamiEl = document.getElementById('whoami');
+    const connStatusEl = document.getElementById('conn-status');
+    const soundToggleEl = document.getElementById('sound-toggle');
     const addressesEl = document.getElementById('addresses');
+    const onlineCountEl = document.getElementById('online-count');
     const onlineEl = document.getElementById('online');
     const messagesEl = document.getElementById('messages');
+    const jumpLatestEl = document.getElementById('jump-latest');
+    const jumpLinkEl = document.getElementById('jump-link');
     const typingEl = document.getElementById('typing');
     const chatForm = document.getElementById('chat-form');
     const msgInput = document.getElementById('msg-input');
     const logoutLink = document.getElementById('logout-link');
 
+    let soundOn = localStorage.getItem('meow_sound') !== '0';
+    function updateSoundLabel() {
+      soundToggleEl.textContent = soundOn ? '[sound: on]' : '[sound: off]';
+    }
+    updateSoundLabel();
+    soundToggleEl.addEventListener('click', (e) => {
+      e.preventDefault();
+      soundOn = !soundOn;
+      localStorage.setItem('meow_sound', soundOn ? '1' : '0');
+      updateSoundLabel();
+    });
+
+    function playPingBeep() {
+      if (!soundOn) return;
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(1175, ctx.currentTime + 0.08);
+        gain.gain.setValueAtTime(0.06, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.15);
+      } catch {}
+    }
+
     let currentUser = '';
     let ws = null;
     let messages = [];
+    let onlineUsers = [];
     let typingStopTimer = null;
     let lastTypingSent = 0;
+
+    const NAME_COLORS = [
+      '#b91c1c', '#0369a1', '#15803d', '#7e22ce', '#c2410c',
+      '#0f766e', '#be185d', '#4338ca', '#a16207', '#1d4ed8',
+    ];
+
+    function userColor(name) {
+      let h = 0;
+      const s = String(name || '').toLowerCase();
+      for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+      return NAME_COLORS[h % NAME_COLORS.length];
+    }
+
+    function insertMention(name) {
+      const val = msgInput.value;
+      const pos = msgInput.selectionStart ?? val.length;
+      const before = val.slice(0, pos);
+      const after = val.slice(pos);
+      const replaced = before.replace(/@[a-zA-Z0-9_-]*$/, '');
+      const prefix = replaced.length > 0 && !/\s$/.test(replaced) && replaced === before ? `${replaced} ` : replaced;
+      const insert = `@${name} `;
+      msgInput.value = prefix + insert + after;
+      const nextPos = prefix.length + insert.length;
+      msgInput.focus();
+      msgInput.setSelectionRange(nextPos, nextPos);
+      closeMentionMenu();
+    }
+
+    function renderOnline(users) {
+      onlineUsers = users || [];
+      onlineCountEl.textContent = String(onlineUsers.length);
+      onlineEl.textContent = '';
+      if (onlineUsers.length === 0) {
+        onlineEl.textContent = 'none';
+        return;
+      }
+      onlineUsers.forEach((u, idx) => {
+        if (idx > 0) onlineEl.appendChild(document.createTextNode('\n'));
+        const span = document.createElement('span');
+        span.className = 'user-link';
+        span.style.color = userColor(u);
+        span.textContent = `* ${u}`;
+        span.title = `click to @${u}`;
+        span.onclick = () => insertMention(u);
+        onlineEl.appendChild(span);
+      });
+    }
+
+    function appendTextWithMentions(parent, text) {
+      const re = /(@[a-zA-Z0-9_-]+|https?:\/\/[^\s<]+)/g;
+      let last = 0;
+      for (const match of text.matchAll(re)) {
+        if (match.index > last) {
+          parent.appendChild(document.createTextNode(text.slice(last, match.index)));
+        }
+        const token = match[0];
+        if (token.startsWith('@')) {
+          const span = document.createElement('span');
+          span.className = 'mention';
+          span.style.color = userColor(token.slice(1));
+          span.textContent = token;
+          parent.appendChild(span);
+        } else {
+          const a = document.createElement('a');
+          a.href = token;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = token;
+          parent.appendChild(a);
+        }
+        last = match.index + token.length;
+      }
+      if (last < text.length) {
+        parent.appendChild(document.createTextNode(text.slice(last)));
+      }
+    }
 
     function formatTime(ts) {
       const d = new Date(ts);
       const hh = String(d.getHours()).padStart(2, '0');
       const mm = String(d.getMinutes()).padStart(2, '0');
       return `${hh}:${mm}`;
+    }
+
+    function formatSeen(msg) {
+      const seenOthers = (msg.seenBy || []).filter((u) => u !== msg.username);
+      return seenOthers.length > 0 ? `seen: ${seenOthers.join(', ')}` : 'sent';
+    }
+
+    function createMessageEl(msg) {
+      const wrap = document.createElement('div');
+      wrap.className = isPingForMe(msg) ? 'msg ping' : 'msg';
+      wrap.dataset.id = msg.id;
+
+      const line = document.createElement('span');
+      line.className = 'msg-line';
+      line.appendChild(document.createTextNode(`[${formatTime(msg.createdAt)}] `));
+
+      const sender = document.createElement('span');
+      sender.className = 'user-link';
+      sender.style.color = userColor(msg.username);
+      sender.textContent = msg.username;
+      sender.title = `click to @${msg.username}`;
+      sender.onclick = () => insertMention(msg.username);
+      line.appendChild(sender);
+
+      line.appendChild(document.createTextNode(': '));
+      appendTextWithMentions(line, msg.text);
+      wrap.appendChild(line);
+
+      const seenEl = document.createElement('span');
+      seenEl.className = 'seen';
+      seenEl.textContent = formatSeen(msg);
+      wrap.appendChild(seenEl);
+
+      return wrap;
     }
 
     function renderMessages(scrollToBottom = false) {
@@ -149,38 +342,52 @@
       messagesEl.textContent = '';
       if (messages.length === 0) {
         const empty = document.createElement('pre');
+        empty.id = 'empty-msg';
         empty.textContent = 'no messages yet. say hi!';
         messagesEl.appendChild(empty);
         return;
       }
 
-      function formatSeen(msg) {
-        const seenOthers = (msg.seenBy || []).filter((u) => u !== msg.username);
-        return seenOthers.length > 0 ? `seen: ${seenOthers.join(', ')}` : 'sent';
-      }
-
+      const frag = document.createDocumentFragment();
       for (const msg of messages) {
-        const wrap = document.createElement('div');
-        wrap.className = isPingForMe(msg) ? 'msg ping' : 'msg';
-        wrap.dataset.id = msg.id;
-
-        const line = document.createElement('span');
-        line.className = 'msg-line';
-        line.textContent = `[${formatTime(msg.createdAt)}] ${msg.username}: ${msg.text}`;
-        wrap.appendChild(line);
-
-        const seenEl = document.createElement('span');
-        seenEl.className = 'seen';
-        seenEl.textContent = formatSeen(msg);
-        wrap.appendChild(seenEl);
-
-        messagesEl.appendChild(wrap);
+        frag.appendChild(createMessageEl(msg));
       }
+      messagesEl.appendChild(frag);
 
       if (scrollToBottom || wasAtBottom) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
+        jumpLatestEl.style.display = 'none';
+      } else {
+        jumpLatestEl.style.display = 'block';
       }
     }
+
+    function appendMessage(msg, forceScroll = false) {
+      const wasAtBottom =
+        messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 30;
+      const empty = document.getElementById('empty-msg');
+      if (empty) empty.remove();
+
+      messagesEl.appendChild(createMessageEl(msg));
+
+      if (forceScroll || wasAtBottom) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        jumpLatestEl.style.display = 'none';
+      } else {
+        jumpLatestEl.style.display = 'block';
+      }
+    }
+
+    jumpLinkEl.addEventListener('click', (e) => {
+      e.preventDefault();
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      jumpLatestEl.style.display = 'none';
+    });
+
+    messagesEl.addEventListener('scroll', () => {
+      const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 30;
+      if (atBottom) jumpLatestEl.style.display = 'none';
+    });
 
     function updateSeenInDom(updates) {
       const map = new Map(updates.map((u) => [u.id, u.seenBy]));
@@ -238,9 +445,10 @@
 
     function notifyNewMessage(msg) {
       if (!msg || msg.username === currentUser) return;
+      const ping = isPingForMe(msg);
+      if (ping) playPingBeep();
       if (!document.hidden && document.hasFocus()) return;
 
-      const ping = isPingForMe(msg);
       if (flashTimer && flashIsPing && !ping) return;
 
       stopFlash();
@@ -261,8 +469,23 @@
     }
 
     function renderAddresses(urls) {
-      const list = urls || [];
-      addressesEl.textContent = list.length > 0 ? list.join('\n') : window.location.origin;
+      const list = urls && urls.length > 0 ? urls : [window.location.origin];
+      addressesEl.textContent = '';
+      list.forEach((u, idx) => {
+        if (idx > 0) addressesEl.appendChild(document.createTextNode('\n'));
+        const span = document.createElement('span');
+        span.className = 'addr-link';
+        span.textContent = u;
+        span.title = 'click to copy';
+        span.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(u);
+            span.textContent = `${u} (copied!)`;
+            setTimeout(() => { span.textContent = u; }, 1200);
+          } catch {}
+        };
+        addressesEl.appendChild(span);
+      });
     }
 
     function renderTyping(typingUsers) {
@@ -275,6 +498,8 @@
         typingEl.textContent = `${others.join(', ')} are typing...`;
       }
     }
+
+    let serverVersion = '';
 
     function connect() {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -294,23 +519,37 @@
         }
 
         if (data.type === 'init') {
+          if (serverVersion && data.version && serverVersion !== data.version) {
+            window.location.reload();
+            return;
+          }
+          serverVersion = data.version || '';
+          connStatusEl.textContent = '[connected]';
           currentUser = data.username;
           whoamiEl.textContent = `user: ${currentUser}`;
+          whoamiEl.style.color = userColor(currentUser);
+          const prevLastId = messages[messages.length - 1]?.id;
+          const nextLastId = data.messages?.[data.messages.length - 1]?.id;
+          const sameHistory =
+            messages.length > 0 &&
+            messages.length === (data.messages?.length || 0) &&
+            prevLastId === nextLastId;
           messages = data.messages || [];
-          onlineEl.textContent = (data.online || []).map((u) => `* ${u}`).join('\n') || 'none';
+          renderOnline(data.online);
           renderAddresses(data.addresses);
           renderTyping(data.typing || []);
-          renderMessages(true);
+          if (!sameHistory) renderMessages(true);
           markVisibleAsSeen();
+          msgInput.focus();
         } else if (data.type === 'presence') {
-          onlineEl.textContent = (data.online || []).map((u) => `* ${u}`).join('\n') || 'none';
+          renderOnline(data.online);
         } else if (data.type === 'addresses') {
           renderAddresses(data.urls);
         } else if (data.type === 'typing') {
           renderTyping(data.typing || []);
         } else if (data.type === 'message') {
           messages.push(data.message);
-          renderMessages(true);
+          appendMessage(data.message, data.message.username === currentUser);
           markVisibleAsSeen();
           notifyNewMessage(data.message);
         } else if (data.type === 'seen') {
@@ -319,11 +558,85 @@
       };
 
       ws.onclose = () => {
+        connStatusEl.textContent = '[reconnecting...]';
         setTimeout(connect, 1500);
       };
     }
 
+    const mentionMenuEl = document.getElementById('mention-menu');
+    let mentionMatches = [];
+    let mentionIndex = 0;
+
+    function knownUsers() {
+      const set = new Set(onlineUsers);
+      for (const m of messages) set.add(m.username);
+      set.delete(currentUser);
+      return [...set].sort();
+    }
+
+    function closeMentionMenu() {
+      mentionMenuEl.style.display = 'none';
+      mentionMatches = [];
+      mentionIndex = 0;
+    }
+
+    function renderMentionMenu() {
+      if (mentionMatches.length === 0) {
+        closeMentionMenu();
+        return;
+      }
+      mentionMenuEl.textContent = '';
+      mentionMatches.forEach((u, i) => {
+        const item = document.createElement('div');
+        item.className = i === mentionIndex ? 'mention-item active' : 'mention-item';
+        item.style.color = userColor(u);
+        item.textContent = `@${u}`;
+        item.onmousedown = (e) => {
+          e.preventDefault();
+          insertMention(u);
+        };
+        mentionMenuEl.appendChild(item);
+      });
+      mentionMenuEl.style.display = 'block';
+    }
+
+    function updateMentionMenu() {
+      const val = msgInput.value;
+      const pos = msgInput.selectionStart ?? val.length;
+      const before = val.slice(0, pos);
+      const match = before.match(/(?:^|\s)@([a-zA-Z0-9_-]*)$/);
+      if (!match) {
+        closeMentionMenu();
+        return;
+      }
+      const query = match[1].toLowerCase();
+      mentionMatches = knownUsers().filter((u) => u.toLowerCase().startsWith(query));
+      mentionIndex = 0;
+      renderMentionMenu();
+    }
+
+    msgInput.addEventListener('keydown', (e) => {
+      if (mentionMatches.length === 0) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        mentionIndex = (mentionIndex + 1) % mentionMatches.length;
+        renderMentionMenu();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        mentionIndex = (mentionIndex - 1 + mentionMatches.length) % mentionMatches.length;
+        renderMentionMenu();
+      } else if (e.key === 'Tab' || e.key === 'Enter') {
+        e.preventDefault();
+        insertMention(mentionMatches[mentionIndex]);
+      } else if (e.key === 'Escape') {
+        closeMentionMenu();
+      }
+    });
+
+    msgInput.addEventListener('blur', () => setTimeout(closeMentionMenu, 100));
+
     msgInput.addEventListener('input', () => {
+      updateMentionMenu();
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
       const hasText = msgInput.value.trim().length > 0;
