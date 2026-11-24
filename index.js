@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { networkInterfaces } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { Elysia, t } from 'elysia'
 
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), 'data', 'db.json')
+const UPLOADS_DIR = process.env.UPLOADS_DIR || join(dirname(DB_PATH), 'uploads')
 const ADMINS_PATH = process.env.ADMINS_PATH || join(process.cwd(), 'admins.json')
 const PORT = Number(process.env.PORT) || 3000
 const INVITE_CODE = process.env.INVITE_CODE || 'fieldg'
@@ -215,6 +216,59 @@ const app = new Elysia()
     return { ok: true, username }
   })
   .post(
+    '/api/upload',
+    async ({ body, cookie, set }) => {
+      const username = getUserFromToken(cookie[COOKIE]?.value)
+      if (!username) {
+        set.status = 401
+        return { ok: false, error: 'Unauthorized' }
+      }
+      const file = body.file
+      const id = crypto.randomUUID().slice(0, 12)
+      const safeName = basename(file.name || 'file').replace(/[^\w.\-() ]+/g, '_') || 'file'
+      const dir = join(UPLOADS_DIR, id)
+      mkdirSync(dir, { recursive: true })
+      await Bun.write(join(dir, safeName), file)
+
+      const msg = {
+        id: crypto.randomUUID(),
+        username,
+        text: typeof body.caption === 'string' ? body.caption.trim().slice(0, 500) : '',
+        file: {
+          id,
+          name: safeName,
+          size: file.size,
+          url: `/uploads/${id}/${encodeURIComponent(safeName)}`,
+        },
+        createdAt: Date.now(),
+        seenBy: [username],
+      }
+      db.messages.push(msg)
+      if (db.messages.length > 500) db.messages = db.messages.slice(-500)
+      saveDb()
+
+      clearTyping(app.server, username)
+      broadcast(app.server, { type: 'message', message: msg })
+      return { ok: true, message: msg }
+    },
+    {
+      body: t.Object({
+        file: t.File({ maxSize: 100 * 1024 * 1024 }),
+        caption: t.Optional(t.String()),
+      }),
+    },
+  )
+  .get('/uploads/:id/:name', ({ params, set }) => {
+    const id = basename(params.id)
+    const name = basename(decodeURIComponent(params.name))
+    const filePath = join(UPLOADS_DIR, id, name)
+    if (!existsSync(filePath)) {
+      set.status = 404
+      return 'Not found'
+    }
+    return Bun.file(filePath)
+  })
+  .post(
     '/api/bridges',
     ({ body }) => {
       bridges.set(body.id, { urls: body.urls.slice(0, 16), lastSeen: Date.now() })
@@ -314,15 +368,19 @@ const app = new Elysia()
         }
       } else if (data.type === 'delete' && typeof data.id === 'string') {
         if (!isAdmin(username)) return
-        const before = db.messages.length
-        db.messages = db.messages.filter((m) => m.id !== data.id)
-        if (db.messages.length !== before) {
+        const target = db.messages.find((m) => m.id === data.id)
+        if (target) {
+          db.messages = db.messages.filter((m) => m.id !== data.id)
+          if (target.file?.id) {
+            rmSync(join(UPLOADS_DIR, basename(target.file.id)), { recursive: true, force: true })
+          }
           saveDb()
           broadcast(app.server, { type: 'delete', id: data.id })
         }
       } else if (data.type === 'clear') {
         if (!isAdmin(username)) return
         db.messages = []
+        rmSync(UPLOADS_DIR, { recursive: true, force: true })
         saveDb()
         broadcast(app.server, { type: 'clear' })
       }

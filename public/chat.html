@@ -91,6 +91,13 @@
       white-space: nowrap;
       flex-shrink: 0;
     }
+    .msg-meta {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      flex-shrink: 0;
+      margin-left: auto;
+    }
     #chat-form {
       position: relative;
       display: flex;
@@ -155,10 +162,13 @@
         <div class="chat-col">
           <div id="messages"></div>
           <div id="jump-latest"><a href="#" id="jump-link">[new messages ↓]</a></div>
+          <pre id="upload-progress" style="display: none; margin: 4px 0 0 0;"></pre>
           <pre id="typing">&nbsp;</pre>
           <form id="chat-form">
             <div id="mention-menu"></div>
-            <input id="msg-input" type="text" placeholder="say something... (@ to mention)" autocomplete="off" maxlength="2000">
+            <input id="file-input" type="file" hidden>
+            <input id="msg-input" type="text" placeholder="say something... (@ to mention, drop file)" autocomplete="off" maxlength="2000">
+            <button type="button" id="file-btn">file</button>
             <button type="submit">send</button>
           </form>
         </div>
@@ -179,6 +189,9 @@
     const typingEl = document.getElementById('typing');
     const chatForm = document.getElementById('chat-form');
     const msgInput = document.getElementById('msg-input');
+    const fileInput = document.getElementById('file-input');
+    const fileBtn = document.getElementById('file-btn');
+    const uploadProgressEl = document.getElementById('upload-progress');
     const clearLink = document.getElementById('clear-link');
     const logoutLink = document.getElementById('logout-link');
 
@@ -268,8 +281,15 @@
       });
     }
 
+    function formatBytes(bytes) {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+      return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+    }
+
     function appendTextWithMentions(parent, text) {
-      const re = /(@[a-zA-Z0-9_-]+|https?:\/\/[^\s<]+)/g;
+      const re = /(@[a-zA-Z0-9_-]+|(?:https?:\/\/|www\.)[^\s<]+)/g;
       let last = 0;
       for (const match of text.matchAll(re)) {
         if (match.index > last) {
@@ -284,7 +304,7 @@
           parent.appendChild(span);
         } else {
           const a = document.createElement('a');
-          a.href = token;
+          a.href = token.startsWith('www.') ? `https://${token}` : token;
           a.target = '_blank';
           a.rel = 'noopener noreferrer';
           a.textContent = token;
@@ -327,13 +347,35 @@
       line.appendChild(sender);
 
       line.appendChild(document.createTextNode(': '));
-      appendTextWithMentions(line, msg.text);
+      if (msg.file) {
+        const fileLink = document.createElement('a');
+        fileLink.href = msg.file.url;
+        fileLink.target = '_blank';
+        fileLink.rel = 'noopener noreferrer';
+        fileLink.textContent = msg.file.name;
+        line.appendChild(fileLink);
+
+        const sizeSpan = document.createElement('span');
+        sizeSpan.className = 'seen';
+        sizeSpan.textContent = ` (${formatBytes(msg.file.size)})`;
+        line.appendChild(sizeSpan);
+
+        if (msg.text) {
+          line.appendChild(document.createTextNode(' '));
+          appendTextWithMentions(line, msg.text);
+        }
+      } else {
+        appendTextWithMentions(line, msg.text);
+      }
       wrap.appendChild(line);
+
+      const meta = document.createElement('span');
+      meta.className = 'msg-meta';
 
       const seenEl = document.createElement('span');
       seenEl.className = 'seen';
       seenEl.textContent = formatSeen(msg);
-      wrap.appendChild(seenEl);
+      meta.appendChild(seenEl);
 
       if (isAdmin) {
         const del = document.createElement('a');
@@ -347,8 +389,10 @@
             ws.send(JSON.stringify({ type: 'delete', id: msg.id }));
           }
         };
-        wrap.appendChild(del);
+        meta.appendChild(del);
       }
+
+      wrap.appendChild(meta);
 
       return wrap;
     }
@@ -491,18 +535,26 @@
       addressesEl.textContent = '';
       list.forEach((u, idx) => {
         if (idx > 0) addressesEl.appendChild(document.createTextNode('\n'));
-        const span = document.createElement('span');
-        span.className = 'addr-link';
-        span.textContent = u;
-        span.title = 'click to copy';
-        span.onclick = async () => {
+        const a = document.createElement('a');
+        a.href = u;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = u;
+        addressesEl.appendChild(a);
+
+        addressesEl.appendChild(document.createTextNode(' '));
+        const copy = document.createElement('a');
+        copy.href = '#';
+        copy.textContent = '[copy]';
+        copy.onclick = async (e) => {
+          e.preventDefault();
           try {
             await navigator.clipboard.writeText(u);
-            span.textContent = `${u} (copied!)`;
-            setTimeout(() => { span.textContent = u; }, 1200);
+            copy.textContent = '[copied!]';
+            setTimeout(() => { copy.textContent = '[copy]'; }, 1200);
           } catch {}
         };
-        addressesEl.appendChild(span);
+        addressesEl.appendChild(copy);
       });
     }
 
@@ -709,6 +761,79 @@
 
     document.addEventListener('visibilitychange', onReturnToTab);
     window.addEventListener('focus', onReturnToTab);
+
+    function uploadFile(file) {
+      if (!file) return;
+      const formData = new FormData();
+      formData.append('file', file);
+      const caption = msgInput.value.trim();
+      if (caption) {
+        formData.append('caption', caption);
+        msgInput.value = '';
+      }
+
+      const xhr = new XMLHttpRequest();
+      const startTime = Date.now();
+      let lastTime = startTime;
+      let lastLoaded = 0;
+
+      uploadProgressEl.style.display = 'block';
+      uploadProgressEl.textContent = `uploading ${file.name} [..........] 0%`;
+
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.min(100, Math.round((e.loaded / e.total) * 100));
+        const filled = Math.round(pct / 10);
+        const bar = '#'.repeat(filled) + '.'.repeat(10 - filled);
+
+        const now = Date.now();
+        const dt = (now - lastTime) / 1000;
+        const speed = dt > 0.1
+          ? (e.loaded - lastLoaded) / dt
+          : e.loaded / Math.max(0.001, (now - startTime) / 1000);
+        if (dt > 0.1) {
+          lastTime = now;
+          lastLoaded = e.loaded;
+        }
+
+        uploadProgressEl.textContent =
+          `uploading ${file.name} [${bar}] ${pct}% (${formatBytes(Math.max(0, speed))}/s) ${formatBytes(e.loaded)}/${formatBytes(e.total)}`;
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          uploadProgressEl.style.display = 'none';
+        } else {
+          uploadProgressEl.textContent = `upload failed (${xhr.status})`;
+          setTimeout(() => { uploadProgressEl.style.display = 'none'; }, 3000);
+        }
+      };
+
+      xhr.onerror = () => {
+        uploadProgressEl.textContent = 'upload error';
+        setTimeout(() => { uploadProgressEl.style.display = 'none'; }, 3000);
+      };
+
+      xhr.open('POST', '/api/upload');
+      xhr.send(formData);
+    }
+
+    fileBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) {
+        uploadFile(fileInput.files[0]);
+        fileInput.value = '';
+      }
+    });
+
+    messagesEl.addEventListener('dragover', (e) => {
+      e.preventDefault();
+    });
+    messagesEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const file = e.dataTransfer?.files?.[0];
+      if (file) uploadFile(file);
+    });
 
     clearLink.addEventListener('click', (e) => {
       e.preventDefault();
