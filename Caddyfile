@@ -1,0 +1,8 @@
+meowchat.0xf.hu {
+	# Redirect root visitors to the live Mac/LAN bridge IP (via /go),
+	# or fall back to serving meowchat directly if no bridge is online.
+	@root path /
+	redir @root /go 302
+
+	reverse_proxy localhost:3000
+}

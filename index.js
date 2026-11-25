@@ -7,6 +7,7 @@ const DB_PATH = process.env.DB_PATH || join(process.cwd(), 'data', 'db.json')
 const UPLOADS_DIR = process.env.UPLOADS_DIR || join(dirname(DB_PATH), 'uploads')
 const ADMINS_PATH = process.env.ADMINS_PATH || join(process.cwd(), 'admins.json')
 const PORT = Number(process.env.PORT) || 3000
+const PUBLIC_URL = process.env.PUBLIC_URL || 'https://meowchat.0xf.hu'
 const INVITE_CODE = process.env.INVITE_CODE || 'fieldg'
 const COOKIE = 'meow_session'
 const BUILD_ID = crypto.randomUUID()
@@ -87,11 +88,30 @@ const getAccessibleUrls = () => {
   for (const [id, b] of bridges) {
     if (now - b.lastSeen > 20000) bridges.delete(id)
   }
-  const all = new Set(getLocalUrls())
+  const all = new Set([...(PUBLIC_URL ? [PUBLIC_URL] : []), ...getLocalUrls()])
   for (const b of bridges.values()) {
     for (const u of b.urls) all.add(u)
   }
   return [...all]
+}
+
+const getBestBridgeUrl = () => {
+  const now = Date.now()
+  const urls = []
+  for (const [id, b] of bridges) {
+    if (now - b.lastSeen > 20000) {
+      bridges.delete(id)
+      continue
+    }
+    urls.push(...b.urls)
+  }
+  if (urls.length === 0) return null
+  return (
+    urls.find((u) => /^https?:\/\/10\./.test(u)) ||
+    urls.find((u) => /^https?:\/\/(192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(u)) ||
+    urls.find((u) => !u.includes('.local')) ||
+    urls[0]
+  )
 }
 
 let lastUrlsKey = ''
@@ -117,6 +137,20 @@ const clearTyping = (server, username) => {
 
 const app = new Elysia()
   .get('/', ({ cookie, set }) => {
+    if (!getUserFromToken(cookie[COOKIE]?.value)) {
+      set.status = 302
+      set.headers.location = '/login'
+      return ''
+    }
+    return Bun.file('public/chat.html')
+  })
+  .get('/go', ({ cookie, set }) => {
+    const target = getBestBridgeUrl()
+    if (target) {
+      set.status = 302
+      set.headers.location = target
+      return ''
+    }
     if (!getUserFromToken(cookie[COOKIE]?.value)) {
       set.status = 302
       set.headers.location = '/login'
