@@ -5,15 +5,44 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>meowchat - login</title>
   <style>
+    :root {
+      --bg: #111;
+      --fg: #e5e5e5;
+      --border: #555;
+      --input-bg: #1a1a1a;
+      --btn-bg: #222;
+    }
+    [data-theme="light"] {
+      --bg: #fff;
+      --fg: #000;
+      --border: #000;
+      --input-bg: #fff;
+      --btn-bg: #eee;
+    }
     * {
       line-height: 14px;
     }
     body {
       font-family: monospace;
       margin-top: 40px;
+      background: var(--bg);
+      color: var(--fg);
     }
     hr {
       width: 340px;
+      border: 0;
+      border-top: 1px solid var(--border);
+    }
+    input, button {
+      font-family: monospace;
+      background: var(--input-bg);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      padding: 4px 6px;
+    }
+    button {
+      background: var(--btn-bg);
+      cursor: pointer;
     }
     form {
       display: flex;
@@ -52,6 +81,9 @@ glhf!</pre>
   </div>
 
   <script>
+    if (localStorage.getItem('meow_theme') === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
     const form = document.getElementById('auth-form');
     const registerBtn = document.getElementById('register-btn');
     const statusEl = document.getElementById('status');
